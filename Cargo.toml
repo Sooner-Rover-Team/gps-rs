@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+pisserror = "0.3.0-rc.2"
 tracing = "0.1.41"
 
 [build-dependencies]
