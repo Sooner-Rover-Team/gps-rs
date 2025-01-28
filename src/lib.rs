@@ -246,7 +246,7 @@ pub struct ErrorInMm(pub f64);
 #[cfg_attr(feature = "python", pyo3::pymethods)]
 impl ErrorInMm {
     pub fn __str__(&self) -> String {
-        format!("{:.2}cm", self.0)
+        format!("{:.2}mm", self.0)
     }
 }
 
