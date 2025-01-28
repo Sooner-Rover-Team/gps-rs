@@ -25,3 +25,6 @@ build/
 
 # editors
 .vscode/
+
+# pyo3/maturin (python builds)
+dist/
