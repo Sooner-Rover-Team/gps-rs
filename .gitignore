@@ -28,3 +28,4 @@ build/
 
 # pyo3/maturin (python builds)
 dist/
+**/__pycache__/
