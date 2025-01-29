@@ -85,6 +85,7 @@ impl Gps {
     ///
     /// This constructor can fail if the given IP and port are not able to be
     /// converted to a CString, but this should generally succeed.
+    #[tracing::instrument]
     pub fn new(ip: IpAddr, port: u16) -> Result<Self, GpsError> {
         // FIXME: we currently don't have a way to check if the device is
         // already talking to another device! the `PTHREAD_MUTEX` may provide
@@ -106,9 +107,8 @@ impl Gps {
 
         // SAFETY: we will not deallocate the given ip + port until we also
         // stop the GPS thread. (see `Drop::drop` impl)
-        unsafe {
-            bindings::gps_init(ip, port);
-        }
+        unsafe { bindings::gps_init(ip, port) };
+        tracing::debug!("performed `gps_init` call on the Rust side. the thread should now be up.");
 
         Ok(Self {
             ip_ptr: ip,
@@ -152,6 +152,7 @@ pyo3::create_exception!(error, GpsException, pyo3::exceptions::PyException);
 #[cfg_attr(feature = "python", pyo3::pymethods)]
 impl Gps {
     #[new]
+    #[tracing::instrument]
     pub fn py_new(ip: String, port: u16) -> pyo3::PyResult<Self> {
         let ip = ip.parse()?;
 
@@ -162,6 +163,7 @@ impl Gps {
 
     /// Finds the coordinate as determined by the GPS.
     #[pyo3(name = "coord")]
+    #[tracing::instrument(skip(self))]
     pub fn py_coord(&self) -> Coordinate {
         self.coord()
     }
@@ -170,12 +172,14 @@ impl Gps {
     ///
     /// See the [`Height`] for additional information.
     #[pyo3(name = "height")]
+    #[tracing::instrument(skip(self))]
     pub fn py_height(&self) -> Height {
         self.height()
     }
 
     /// Gets the known 'error' in millimeters from the GPS.
     #[pyo3(name = "error")]
+    #[tracing::instrument(skip(self))]
     pub fn py_error(&self) -> ErrorInMm {
         self.error()
     }
