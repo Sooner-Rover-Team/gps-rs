@@ -191,10 +191,10 @@ impl Drop for Gps {
     #[tracing::instrument(skip(self))]
     fn drop(&mut self) {
         tracing::debug!("Calling `gps_finish`...");
-        unsafe { bindings::gps_finish() };
 
-        drop(unsafe { CString::from_raw(self.ip_ptr) });
-        drop(unsafe { CString::from_raw(self.port_ptr) });
+        // SAFETY: we do not drop the strings we gave it, as doing so can cause
+        // a double-free. and the library already has one of those somewhere!
+        unsafe { bindings::gps_finish() };
     }
 }
 
