@@ -3,6 +3,14 @@ name = "soro_gps"
 version = "0.1.0"
 edition = "2021"
 
+description = "Bindings to the Sooner Rover Team's `gps` library"
+repository = "https://github.com/Sooner-Rover-Team/gps-rs"
+homepage = "https://github.com/Sooner-Rover-Team"
+license = "MIT"
+categories = ["science::robotics", "api-bindings"]
+keywords = ["soro", "sooner-rover-team", "urc", "mars", "rover"]
+readme = "README.md"
+
 
 [lib]
 crate-time = ["staticlib"]
