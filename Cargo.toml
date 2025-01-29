@@ -1,5 +1,5 @@
 [package]
-name = "gps_rs"
+name = "soro_gps"
 version = "0.1.0"
 edition = "2021"
 
@@ -24,3 +24,6 @@ cc = "1.2.10"
 [tool.maturin]
 bindings = "pyo3"
 features = ["python"]
+
+[dev-dependencies]
+tracing-subscriber = "0.3.19"

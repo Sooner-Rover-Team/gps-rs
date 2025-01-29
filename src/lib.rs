@@ -14,7 +14,7 @@
 //!
 //! ```
 //! # use core::net::IpAddr;
-//! use gps_rs::Gps;
+//! use soro_gps::Gps;
 //!
 //! // we can make a GPS from a given IP address and port.
 //! //
@@ -36,7 +36,7 @@
 //! ## Usage (Python)
 //!
 //! ```python
-//! from gps_rs import Gps
+//! from soro_gps import Gps
 //!
 //! # make a gps from an ip str + port int
 //! gps: Gps = Gps("192.168.1.222", 55556)
