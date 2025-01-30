@@ -12,7 +12,7 @@
 //!
 //! In short, you can use the various methods on `Gps` to interact with the Rover's GPS system.
 //!
-//! ```
+//! ```no_run
 //! # use core::net::IpAddr;
 //! use soro_gps::Gps;
 //!
@@ -49,9 +49,15 @@
 //!
 //! ## Development
 //!
-//! You'll want to get Rust and `maturin`. Download `cargo-binstall`, then run `cargo binstall maturin`.
+//! To make small changes on the Rust side of things, you won't need any Python tooling until you make a release. Just [install Rust](https://rustup.rs).
 //!
-//! Afterwards, you can distribute
+//! For anything past that (especially Python development), you'll want to get `maturin`. To do so, [download `cargo-binstall`](https://github.com/cargo-bins/cargo-binstall?tab=readme-ov-file#quickly), then run `cargo binstall maturin`.
+//!
+//! Afterwards, you can build the Python wheel with `maturin build --release --out dist --interpreter python3.13`. That'll result in a `.whl` ("wheel") file in the `dist/` directory. Distribute it on PyPi by running `maturin publish`. Alternatively, you can push it into your virtual environment with `pip install soro_gps --find-links dist --force-reinstall`.
+//!
+//! ### Testing
+//!
+//! You'll want to run the tests before
 
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -63,6 +69,8 @@ use std::{ffi::CString, net::IpAddr};
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+
+pub mod thread;
 
 /// A safe wrapper for the low-level GPS functions.
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
@@ -149,6 +157,7 @@ impl Gps {
 #[cfg(feature = "python")]
 pyo3::create_exception!(error, GpsException, pyo3::exceptions::PyException);
 
+#[cfg(feature = "python")]
 #[cfg_attr(feature = "python", pyo3::pymethods)]
 impl Gps {
     #[new]
@@ -295,7 +304,7 @@ pub struct TimeOfWeek(pub u32);
 // export the module to python!
 #[cfg_attr(feature = "python", pyo3::pymodule)]
 #[cfg(feature = "python")]
-fn gps_rs(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
+fn soro_gps(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     pyo3::types::PyModuleMethods::add_class::<Gps>(m)?;
     pyo3::types::PyModuleMethods::add_class::<Coordinate>(m)?;
     pyo3::types::PyModuleMethods::add_class::<Height>(m)?;
