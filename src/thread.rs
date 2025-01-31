@@ -314,7 +314,11 @@ pub struct GpsData {
     pub imu_raw: Option<msg_imu_raw_t>,
 }
 
-// this one function helps with reading from the socket
+/// Helps read from the socket.
+///
+/// This is a callback from the C code - it isn't called directly.
+///
+/// That means that the parameters above are provided by C, and our casts from
 /// void pointers are basically veeeery scuffed generics.
 ///
 /// For more info on void pointers, see
