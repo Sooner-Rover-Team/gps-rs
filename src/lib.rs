@@ -263,43 +263,15 @@ impl ErrorInMm {
     }
 }
 
-/*
-
-notice: the following was removed since the library returns a `u32` as an
-`f64`/`double`.
-
-i can't tell if that implicit 'cast' will mess with the bit repr, or if it's a
-true conversion into a float.
-
-either way, it's pretty annoying, because milliseconds are pretty specific,
-and `u32` otherwise works perfectly...
-
-impl Gps {
-    pub fn time_of_week(&self) -> TimeOfWeek {
-        // SAFETY: GPS thread is initialized.
-        let tow = unsafe { bindings::get_time() };
-
-        // SAFETY: for some reason, the `u32` is casted to an `f64`/double in the
-        // library.
-        //
-        // i cast it back into a `u64` here...
-        let tow = unsafe { core::mem::transmute(tow) };
-
-        // and here, i push it back into a `u32`
-        let tow = tow as u32;
-
-        TimeOfWeek(tow)
-    }
-}
-
 /// The GPS time of week, given from the satellite. This is measured in
 /// milliseconds since the start of this GNSS week.
 ///
 /// For additional information, see
 /// [the NOAA documentation](https://www.ngs.noaa.gov/CORS/Gpscal.shtml).
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "python", pyo3::pyclass)]
+#[cfg_attr(feature = "python", pyo3(eq))]
 pub struct TimeOfWeek(pub u32);
-
-*/
 
 // export the module to python!
 #[cfg_attr(feature = "python", pyo3::pymodule)]
@@ -309,6 +281,7 @@ fn soro_gps(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     pyo3::types::PyModuleMethods::add_class::<Coordinate>(m)?;
     pyo3::types::PyModuleMethods::add_class::<Height>(m)?;
     pyo3::types::PyModuleMethods::add_class::<ErrorInMm>(m)?;
+    pyo3::types::PyModuleMethods::add_class::<TimeOfWeek>(m)?;
     pyo3::types::PyModuleMethods::add(m, "GpsException", m.py().get_type::<GpsException>())?;
     Ok(())
 }
