@@ -22,13 +22,15 @@ use std::{
 };
 
 use crate::bindings::{
-    gps_time_node, pos_llh_node, sbp_process, sbp_register_callback, sbp_state_init, sbp_state_t,
-    SBP_MSG_BASELINE_NED, SBP_MSG_DOPS, SBP_MSG_GPS_TIME, SBP_MSG_POS_LLH, SBP_MSG_VEL_NED,
+    gps_time_node, msg_baseline_ned_t, msg_dops_t, msg_gps_time_t, msg_imu_raw_t, msg_pos_llh_t,
+    msg_vel_ned_t, pos_llh_node, sbp_process, sbp_register_callback, sbp_state_init, sbp_state_t,
+    SBP_MSG_BASELINE_NED, SBP_MSG_DOPS, SBP_MSG_GPS_TIME, SBP_MSG_IMU_RAW, SBP_MSG_POS_LLH,
+    SBP_MSG_VEL_NED,
 };
 
 /// A wrapper struct to let the binding be Send + Sync.
 #[derive(Clone, Debug)]
-pub struct SbpStateT(sbp_state_t);
+pub struct SbpStateT(*mut sbp_state_t);
 
 unsafe impl Send for SbpStateT {}
 unsafe impl Sync for SbpStateT {}
@@ -42,8 +44,20 @@ pub struct GpsThread {
     /// when set to `true`, the thread will gracefully go down.
     stop_indicator: Arc<AtomicBool>,
 
-    /// Stores the current info about the GPS messages.
-    sbp_state: Arc<Mutex<SbpStateT>>,
+    /// The most recent data available from the GPS.
+    ///
+    /// This is a heap-allocated pointer so we can box + drop it at the end of
+    /// our scope, handling the otherwise-leaked memory.
+    data_ptr: *mut Mutex<GpsData>,
+
+    /// A heap-allocated pointer for the state of the GPS. It's used internally
+    /// by the C library - we don't ever touch this except to feed it to the
+    /// thread we run it all on.
+    ///
+    /// We'll re-box it when we're dropped to 'unleak' the memory.
+    ///
+    /// See the `data_ptr` for addition information.
+    state_ptr: SbpStateT,
 }
 
 impl GpsThread {
@@ -129,14 +143,24 @@ impl GpsThread {
             tracing::debug!("Debug check success: read {read_bytes} bytes from the socket.");
         }
 
+        // make an empty data struct to read messages into.
+        //
+        // we'll leak it into a pointer, then deallocate that when we're
+        // dropped.
+        //
+        // this prevents the callbacks from referencing a dangling pointer,
+        // but also lets us be more certain about the `*mut` type we cast to.
+        let data = Box::new(Mutex::new(GpsData::default()));
+        let data_ptr = core::ptr::from_mut(Box::leak::<'static>(data));
+
         // add callbacks :)
         unsafe {
             // time of week
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_GPS_TIME as u16,
-                core::ptr::null_mut(),
                 Some(callbacks::time_callback),
+                data_ptr as *mut c_void,
                 &raw mut gps_time_node,
             );
 
@@ -144,8 +168,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_POS_LLH as u16,
-                core::ptr::null_mut(),
                 Some(callbacks::pos_callback),
+                data_ptr as *mut c_void,
                 &raw mut pos_llh_node,
             );
 
@@ -153,8 +177,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_BASELINE_NED as u16,
-                core::ptr::null_mut(),
                 Some(callbacks::baseline_callback),
+                data_ptr as *mut c_void,
                 &raw mut pos_llh_node,
             );
 
@@ -162,8 +186,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_VEL_NED as u16,
-                core::ptr::null_mut(),
                 Some(callbacks::velocity_callback),
+                data_ptr as *mut c_void,
                 &raw mut pos_llh_node,
             );
 
@@ -171,23 +195,28 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_DOPS as u16,
-                core::ptr::null_mut(),
                 Some(callbacks::precision_callback),
+                data_ptr as *mut c_void,
                 &raw mut pos_llh_node,
             );
 
             // imu info
-            // sbp_register_callback(s_ptr, SBP_IMU, cb, context, node)
+            sbp_register_callback(
+                state_ptr,
+                SBP_MSG_IMU_RAW as u16,
+                Some(callbacks::imu_callback),
+                data_ptr as *mut c_void,
+                &raw mut pos_llh_node,
+            );
         }
 
         Ok(Self {
             stop_indicator: Arc::new(AtomicBool::new(false)),
-            sbp_state: Arc::new(Mutex::new(SbpStateT(s))),
+            data_ptr,
+            state_ptr: SbpStateT(state_ptr),
         })
     }
-}
 
-impl GpsThread {
     /// Starts the GPS thread yielding a thread handle.
     ///
     /// To stop the GPS thread, just call `stop` and drop the handle.
@@ -196,16 +225,26 @@ impl GpsThread {
         let stop_indicator = Arc::clone(&self.stop_indicator);
 
         // grab the state
-        let state = Arc::clone(&self.sbp_state);
+        //
+        // SAFETY: the C library is responsible for all future mutation.
+        // we do not modify its contents manually whatsoever past its initial
+        // construction.
+        let state = self.state_ptr.clone();
 
-        // this defines an anonymous closure that's running in the background,
-        // on the thread we just spawned.
+        // this defines an anonymous function (called a closure) that's running
+        // in the background. that's the thread we just spawned!
         //
         // we return the join handle for users to stop the thread when ready.
         Ok(std::thread::spawn(move || {
-            // move state ptr over to thread
+            // move stuff to thread.
+            //
+            // this is required to prevent compiler errors - we're literally
+            // moving these values to the thread.
             let state = state;
             let stop_indicator = stop_indicator;
+
+            // grab the ptr for the c lib.
+            let state_ptr = state.0;
 
             // we'll grab new gps data 20 times a second.
             //
@@ -213,19 +252,11 @@ impl GpsThread {
             //
             // the loop will stop when the stop indicator is `true`.
             while !stop_indicator.load(Ordering::Acquire) {
-                tracing::info!("stop indicator: {}", stop_indicator.load(Ordering::Acquire));
-
-                // we'll wait to access it
-                let mut s = state
-                    .lock()
-                    .inspect_err(|e| tracing::error!("Mutex reported an error! err: {e}"))
-                    .expect("lock should be available");
-
                 // run through all the callbacks (in C)
                 //
                 // SAFETY: this function should be properly implemented by the
                 // underlying library.
-                unsafe { sbp_process(&raw mut s.0, Some(read_socket)) };
+                unsafe { sbp_process(state_ptr, Some(read_socket)) };
 
                 // sleep for 1/20 seconds.
                 //
@@ -240,8 +271,28 @@ impl GpsThread {
     /// Tells the thread to stop running.
     ///
     /// Remember to join or drop the thread handle after doing this.
+    #[tracing::instrument(skip(self))]
     pub fn stop(&mut self) {
         self.stop_indicator.store(true, Ordering::Release);
+        tracing::debug!("Set stop flag for thread.");
+    }
+}
+
+impl Drop for GpsThread {
+    fn drop(&mut self) {
+        // deallocate the 'leaked' memory by putting it back into a box,
+        // then dropping that box.
+        //
+        // SAFETY: this fn is only ever called once, so not a double-free.
+        // also, since Box allocated this memory, it's also layout-compatible.
+        let boxed_data = unsafe { Box::from_raw(self.data_ptr) };
+        drop(boxed_data);
+
+        // do the same for the state.
+        //
+        // SAFETY: see above.
+        let boxed_state = unsafe { Box::from_raw(self.state_ptr.0) };
+        drop(boxed_state);
     }
 }
 
@@ -264,6 +315,10 @@ pub struct GpsData {
 }
 
 // this one function helps with reading from the socket
+/// void pointers are basically veeeery scuffed generics.
+///
+/// For more info on void pointers, see
+/// [this Wikipedia article](https://en.wikipedia.org/wiki/Pointer_(computer_programming)#C_and_C++).
 #[tracing::instrument]
 unsafe extern "C" fn read_socket(buf: *mut u8, buf_len: u32, context: *mut c_void) -> u32 {
     // we'll cast the context from void* and read both ptrs.
