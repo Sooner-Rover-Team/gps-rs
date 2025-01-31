@@ -135,8 +135,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_GPS_TIME as u16,
-                Some(time_callback),
                 core::ptr::null_mut(),
+                Some(callbacks::time_callback),
                 &raw mut gps_time_node,
             );
 
@@ -144,8 +144,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_POS_LLH as u16,
-                Some(pos_callback),
                 core::ptr::null_mut(),
+                Some(callbacks::pos_callback),
                 &raw mut pos_llh_node,
             );
 
@@ -153,8 +153,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_BASELINE_NED as u16,
-                Some(baseline_callback),
                 core::ptr::null_mut(),
+                Some(callbacks::baseline_callback),
                 &raw mut pos_llh_node,
             );
 
@@ -162,8 +162,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_VEL_NED as u16,
-                Some(velocity_callback),
                 core::ptr::null_mut(),
+                Some(callbacks::velocity_callback),
                 &raw mut pos_llh_node,
             );
 
@@ -171,8 +171,8 @@ impl GpsThread {
             sbp_register_callback(
                 state_ptr,
                 SBP_MSG_DOPS as u16,
-                Some(precision_callback),
                 core::ptr::null_mut(),
+                Some(callbacks::precision_callback),
                 &raw mut pos_llh_node,
             );
 
@@ -253,55 +253,6 @@ pub enum GpsThreadError {
 }
 
 /// A message of information received from the GPS.
-///
-/// The fields here may be `None`. If that's the case, the GPS hasn't yet
-/// yielded another message.
-pub struct GpsMessage {
-    /// The time of week, in milliseconds, from the start of the week.
-    ///
-    /// This value stems from the satellite, not the GPS device.
-    time_of_week: u32,
-}
-
-// (private) callbacks
-
-unsafe extern "C" fn time_callback(sender_id: u16, len: u8, msg: *mut u8, context: *mut c_void) {
-    todo!()
-}
-
-unsafe extern "C" fn pos_callback(sender_id: u16, len: u8, msg: *mut u8, context: *mut c_void) {
-    todo!()
-}
-
-unsafe extern "C" fn baseline_callback(
-    sender_id: u16,
-    len: u8,
-    msg: *mut u8,
-    context: *mut c_void,
-) {
-    todo!()
-}
-
-unsafe extern "C" fn velocity_callback(
-    sender_id: u16,
-    len: u8,
-    msg: *mut u8,
-    context: *mut c_void,
-) {
-    todo!()
-}
-
-unsafe extern "C" fn precision_callback(
-    sender_id: u16,
-    len: u8,
-    msg: *mut u8,
-    context: *mut c_void,
-) {
-    todo!()
-}
-
-unsafe extern "C" fn imu_callback(sender_id: u16, len: u8, msg: *mut u8, context: *mut c_void) {
-    todo!()
 }
 
 // this one function helps with reading from the socket
@@ -324,6 +275,76 @@ unsafe extern "C" fn read_socket(buf: *mut u8, buf_len: u32, context: *mut c_voi
         .recv(fat_buf)
         .inspect_err(|e| tracing::warn!("Failed to read from socket! err: {e}"))
         .unwrap_or(0) as u32
+}
+
+/// Callbacks
+///
+/// Each of these follows the same structure.
+///
+/// We assume the C library didn't feed us a junk pointer, grab the contents of
+/// the Mutex, and modify the appropriate field (if we got a lock).
+mod callbacks {
+    use std::ffi::c_void;
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn pos_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn baseline_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn velocity_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn precision_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn time_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
+
+    #[tracing::instrument]
+    pub(super) unsafe extern "C" fn imu_callback(
+        _sender_id: u16,
+        _len: u8,
+        msg: *mut u8,
+        context: *mut c_void,
+    ) {
+        todo!();
+    }
 }
 
 #[cfg(test)]
