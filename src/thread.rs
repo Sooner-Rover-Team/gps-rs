@@ -321,10 +321,8 @@ pub struct GpsData {
 /// [this Wikipedia article](https://en.wikipedia.org/wiki/Pointer_(computer_programming)#C_and_C++).
 #[tracing::instrument]
 unsafe extern "C" fn read_socket(buf: *mut u8, buf_len: u32, context: *mut c_void) -> u32 {
-    // we'll cast the context from void* and read both ptrs.
-    let udp_socket_ptr = context as *mut ManuallyDrop<UdpSocket>; //
-                                                                  // note: since our socket is non-blocking, we have to check if we need to
-                                                                  // try again. that's what this loop does - it will break pretty quickly!
+    // we'll cast the context from void* and read its ptr.
+    let udp_socket_ptr = context as *mut ManuallyDrop<UdpSocket>;
     let udp_socket = &mut core::ptr::read(udp_socket_ptr);
 
     // debug print the socket's fd to assist in debugging ub lol
@@ -347,7 +345,12 @@ unsafe extern "C" fn read_socket(buf: *mut u8, buf_len: u32, context: *mut c_voi
 /// We assume the C library didn't feed us a junk pointer, grab the contents of
 /// the Mutex, and modify the appropriate field (if we got a lock).
 mod callbacks {
-    use std::ffi::c_void;
+    use std::{ffi::c_void, sync::Mutex};
+
+    use super::GpsData;
+    use crate::bindings::{
+        msg_baseline_ned_t, msg_dops_t, msg_gps_time_t, msg_imu_raw_t, msg_pos_llh_t, msg_vel_ned_t,
+    };
 
     #[tracing::instrument]
     pub(super) unsafe extern "C" fn pos_callback(
@@ -356,7 +359,26 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        // we'll cast the pointer into the expected message type
+        let ptr = msg as *mut msg_pos_llh_t;
+
+        // do the same with the context, which is `GpsThread.data`.
+        //
+        // note: the `ManuallyDrop` is EXTREMELY important here.
+        // it prevents us from decreasing the strong ref ct in that thing. which
+        // would invalidate all the other raw pointers! yikes
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        // early-return if we don't have access to the mutex.
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.pos = Some(*ptr);
     }
 
     #[tracing::instrument]
@@ -366,7 +388,19 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        let ptr = msg as *mut msg_baseline_ned_t;
+
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.baseline = Some(*ptr);
     }
 
     #[tracing::instrument]
@@ -376,7 +410,19 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        let ptr = msg as *mut msg_vel_ned_t;
+
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.velocity = Some(*ptr);
     }
 
     #[tracing::instrument]
@@ -386,7 +432,19 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        let ptr = msg as *mut msg_dops_t;
+
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.precision = Some(*ptr);
     }
 
     #[tracing::instrument]
@@ -396,7 +454,19 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        let ptr = msg as *mut msg_gps_time_t;
+
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.time_of_week = Some(*ptr);
     }
 
     #[tracing::instrument]
@@ -406,7 +476,19 @@ mod callbacks {
         msg: *mut u8,
         context: *mut c_void,
     ) {
-        todo!();
+        let ptr = msg as *mut msg_imu_raw_t;
+
+        let data_ptr = context as *mut Mutex<GpsData>;
+        let data = data_ptr.read();
+
+        let Ok(mut data) = data
+            .try_lock()
+            .inspect_err(|e| tracing::warn!("Didn't have access to the data mutex! err: {e}"))
+        else {
+            return;
+        };
+
+        data.imu_raw = Some(*ptr);
     }
 }
 
