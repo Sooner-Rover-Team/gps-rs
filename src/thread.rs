@@ -82,14 +82,17 @@ impl GpsThread {
         //
         // SAFETY: it's initialized as zero'd memory so the initialization
         // function doesn't act up.
-        let mut s: sbp_state_t = unsafe { core::mem::zeroed() };
+        let mut state: sbp_state_t = unsafe { core::mem::zeroed() };
+
+        // now, we'll leak that onto the heap, then rebox it when we're dropped
+        let boxed_state = Box::new(state);
 
         // make the state a pointer, since all the c funcs kinda want that. lol
-        let s_ptr = core::ptr::from_mut(&mut s);
+        let state_ptr = core::ptr::from_mut(Box::leak::<'static>(boxed_state));
 
         // SAFETY: we zeroed the memory, so we're not uninitialized in here.
         // in a sec, we'll also add all the callbacks into the fields.
-        unsafe { sbp_state_init(s_ptr) };
+        unsafe { sbp_state_init(state_ptr) };
         tracing::debug!("Initialized SBP state!");
 
         // SAFETY: uhhh well.
@@ -101,12 +104,12 @@ impl GpsThread {
         // 4. we use `ManuallyDrop` to prevent the file descriptor from being
         //    dropped when we're playing with pointers.
         let leaked_ctx = Box::leak::<'static>(Box::new(ManuallyDrop::new(socket)));
-        s.io_context = core::ptr::from_mut(leaked_ctx) as *mut c_void;
-        tracing::debug!("Added SBP state to C library context.");
+        state.io_context = core::ptr::from_mut(leaked_ctx) as *mut c_void;
 
         // debug check: ensure that we can follow the ptrs
         debug_assert_eq!(
-            unsafe { core::ptr::read(s.io_context as *mut ManuallyDrop<UdpSocket>) }.as_raw_fd(),
+            unsafe { core::ptr::read(state.io_context as *mut ManuallyDrop<UdpSocket>) }
+                .as_raw_fd(),
             socket_fd,
             "file descriptors should be equal despite ptr"
         );
@@ -114,7 +117,7 @@ impl GpsThread {
         // debug check: we should be able to read from it, too
         if cfg!(debug_assertions) {
             let udp_socket =
-                unsafe { core::ptr::read(s.io_context as *mut ManuallyDrop<UdpSocket>) };
+                unsafe { core::ptr::read(state.io_context as *mut ManuallyDrop<UdpSocket>) };
             let mut buf = Vec::new();
 
             // read from the socket until our buffer is full (or we run out of input)
@@ -130,7 +133,7 @@ impl GpsThread {
         unsafe {
             // time of week
             sbp_register_callback(
-                s_ptr,
+                state_ptr,
                 SBP_MSG_GPS_TIME as u16,
                 Some(time_callback),
                 core::ptr::null_mut(),
@@ -139,7 +142,7 @@ impl GpsThread {
 
             // position
             sbp_register_callback(
-                s_ptr,
+                state_ptr,
                 SBP_MSG_POS_LLH as u16,
                 Some(pos_callback),
                 core::ptr::null_mut(),
@@ -148,7 +151,7 @@ impl GpsThread {
 
             // baseline
             sbp_register_callback(
-                s_ptr,
+                state_ptr,
                 SBP_MSG_BASELINE_NED as u16,
                 Some(baseline_callback),
                 core::ptr::null_mut(),
@@ -157,7 +160,7 @@ impl GpsThread {
 
             // velocity
             sbp_register_callback(
-                s_ptr,
+                state_ptr,
                 SBP_MSG_VEL_NED as u16,
                 Some(velocity_callback),
                 core::ptr::null_mut(),
@@ -166,7 +169,7 @@ impl GpsThread {
 
             // precision
             sbp_register_callback(
-                s_ptr,
+                state_ptr,
                 SBP_MSG_DOPS as u16,
                 Some(precision_callback),
                 core::ptr::null_mut(),
