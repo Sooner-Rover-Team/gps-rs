@@ -64,7 +64,9 @@
 #![allow(non_snake_case)]
 
 use core::error::Error;
-use std::{ffi::CString, net::IpAddr};
+use std::net::IpAddr;
+
+use thread::{GpsThread, GpsThreadError};
 
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -73,17 +75,13 @@ pub mod bindings {
 pub mod thread;
 
 /// A safe wrapper for the low-level GPS functions.
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Debug)]
 #[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct Gps {
-    /// A pointer to a boxed character array on the heap.
+    /// The internal `gps.c` reimplementation.
     ///
-    /// This will automatically be deallocated when we're dropped (on the Rust
-    /// side of things).
-    ip_ptr: *mut i8,
-
-    /// Same as above, but for the port.
-    port_ptr: *mut i8,
+    /// It interfaces with the lower-level parts of the C library for us.
+    thread: GpsThread,
 }
 
 impl Gps {
@@ -94,62 +92,57 @@ impl Gps {
     /// This constructor can fail if the given IP and port are not able to be
     /// converted to a CString, but this should generally succeed.
     #[tracing::instrument]
-    pub fn new(ip: IpAddr, port: u16) -> Result<Self, GpsError> {
-        // FIXME: we currently don't have a way to check if the device is
-        // already talking to another device! the `PTHREAD_MUTEX` may provide
-        // a way around this.
+    pub fn new(gps_ip: IpAddr, gps_port: u16, socket_port: u16) -> Result<Self, GpsError> {
+        let thread = GpsThread::new(gps_ip, gps_port, socket_port)
+            .inspect_err(|e| tracing::warn!("Failed to set up GPS thread. err: {e}"))?;
 
-        // make our c string ptrs
-        let ip = CString::new(ip.to_string())
-            .inspect_err(|e| {
-                tracing::error!(
-                    "Failed to create a C-style string from the given IP address input. err: {e}"
-                )
-            })?
-            .into_raw();
-        let port = CString::new(port.to_string())
-            .inspect_err(|e| {
-                tracing::error!("Failed to create a C-style string from the given port. err: {e}")
-            })?
-            .into_raw();
-
-        // SAFETY: we will not deallocate the given ip + port until we also
-        // stop the GPS thread. (see `Drop::drop` impl)
-        unsafe { bindings::gps_init(ip, port) };
-        tracing::debug!("performed `gps_init` call on the Rust side. the thread should now be up.");
-
-        Ok(Self {
-            ip_ptr: ip,
-            port_ptr: port,
-        })
+        Ok(Self { thread })
     }
 
     /// Finds the coordinate as determined by the GPS.
-    pub fn coord(&self) -> Coordinate {
-        // SAFETY: the GPS thread has been initialized.
-        let (lat, lon) = (unsafe { bindings::get_latitude() }, unsafe {
-            bindings::get_longitude()
-        });
+    #[tracing::instrument(skip(self))]
+    pub fn coord(&self) -> Option<Coordinate> {
+        let pos_data = self.thread.data()?.pos?;
 
-        Coordinate { lat, lon }
+        Some(Coordinate {
+            lat: pos_data.lat,
+            lon: pos_data.lon,
+        })
     }
 
     /// Finds the 'height', which is an arbitrary measure with WSG84.
     ///
     /// See the [`Height`] for additional information.
-    pub fn height(&self) -> Height {
-        // SAFETY: the GPS thread is initialized.
-        let height = unsafe { bindings::get_height() };
-
-        Height(height)
+    #[tracing::instrument(skip(self))]
+    pub fn height(&self) -> Option<Height> {
+        let pos_data = self.thread.data()?.pos?;
+        Some(Height(pos_data.height))
     }
 
     /// Gets the known 'error' in millimeters from the GPS.
-    pub fn error(&self) -> ErrorInMm {
-        // SAFETY: GPS thread is initialized.
-        let error = unsafe { bindings::get_error() };
+    #[tracing::instrument(skip(self))]
+    pub fn error(&self) -> Option<ErrorInMm> {
+        let pos_data = self.thread.data()?.pos?;
 
-        ErrorInMm(error)
+        // the following uses two millimeter accuracy values averaged.
+        //
+        // we convert them to f64 before addition to prevent overflows, though
+        // this miiiight decrease accuracy. hoping `f64` is good enough.
+        //
+        // FIXME: this is ripped straight from `gps.c`, but they didn't make
+        // great decisions in there. consider making this error a 'better' type
+        // or something. im doubtful that averaging the two directions makes
+        // for a good result. lol
+        let error = (pos_data.h_accuracy as f64 + pos_data.v_accuracy as f64) / 2.0;
+
+        Some(ErrorInMm(error))
+    }
+
+    /// From the satellite, grabs the number of milliseconds since the start of
+    /// this week. Meaning the "time of week".
+    pub fn time_of_week(&self) -> Option<TimeOfWeek> {
+        let pos_data = self.thread.data()?.pos?;
+        Some(TimeOfWeek(pos_data.tow))
     }
 }
 
@@ -162,10 +155,10 @@ pyo3::create_exception!(error, GpsException, pyo3::exceptions::PyException);
 impl Gps {
     #[new]
     #[tracing::instrument]
-    pub fn py_new(ip: String, port: u16) -> pyo3::PyResult<Self> {
-        let ip = ip.parse()?;
+    pub fn py_new(gps_ip: String, gps_port: u16, socket_port: u16) -> pyo3::PyResult<Self> {
+        let gps_ip = gps_ip.parse()?;
 
-        Self::new(ip, port)
+        Self::new(gps_ip, gps_port, socket_port)
             .inspect_err(|e| tracing::warn!("Failed to create GPS! err: {e}"))
             .map_err(|e| GpsException::new_err(e.to_string()))
     }
@@ -173,7 +166,7 @@ impl Gps {
     /// Finds the coordinate as determined by the GPS.
     #[pyo3(name = "coord")]
     #[tracing::instrument(skip(self))]
-    pub fn py_coord(&self) -> Coordinate {
+    pub fn py_coord(&self) -> Option<Coordinate> {
         self.coord()
     }
 
@@ -182,15 +175,22 @@ impl Gps {
     /// See the [`Height`] for additional information.
     #[pyo3(name = "height")]
     #[tracing::instrument(skip(self))]
-    pub fn py_height(&self) -> Height {
+    pub fn py_height(&self) -> Option<Height> {
         self.height()
     }
 
     /// Gets the known 'error' in millimeters from the GPS.
     #[pyo3(name = "error")]
     #[tracing::instrument(skip(self))]
-    pub fn py_error(&self) -> ErrorInMm {
+    pub fn py_error(&self) -> Option<ErrorInMm> {
         self.error()
+    }
+
+    /// Gets the known 'error' in millimeters from the GPS.
+    #[pyo3(name = "time_of_week")]
+    #[tracing::instrument(skip(self))]
+    pub fn py_time_of_week(&self) -> Option<TimeOfWeek> {
+        self.time_of_week()
     }
 }
 
@@ -212,10 +212,10 @@ impl Drop for Gps {
 }
 
 /// An error that can occur when using the GPS.
-#[derive(Clone, Debug, pisserror::Error)]
+#[derive(Debug, pisserror::Error)]
 pub enum GpsError {
-    #[error("Couldn't create the C-style strings required by the `gps` library. err: {_0}")]
-    CStrCreationFailed(#[from] std::ffi::NulError),
+    #[error("Error occurred while constructing the GPS thread. err: {_0}")]
+    GpsThreadError(#[from] GpsThreadError),
 }
 
 /// Some coordinate returned from the GPS.
