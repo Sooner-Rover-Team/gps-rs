@@ -95,15 +95,15 @@ impl GpsThread {
         //
         // here, we set up the state used by the thead in the background.
         //
+        // we'll leak that onto the heap, then rebox it when we're dropped.
+        //
         // SAFETY: it's initialized as zero'd memory so the initialization
         // function doesn't act up.
-        let mut state: sbp_state_t = unsafe { core::mem::zeroed() };
-
-        // now, we'll leak that onto the heap, then rebox it when we're dropped
-        let boxed_state = Box::new(state);
+        let boxed_state = Box::new(unsafe { core::mem::zeroed() });
+        let state = Box::leak::<'static>(boxed_state);
 
         // make the state a pointer, since all the c funcs kinda want that. lol
-        let state_ptr = core::ptr::from_mut(Box::leak::<'static>(boxed_state));
+        let state_ptr = core::ptr::from_mut(state);
 
         // SAFETY: we zeroed the memory, so we're not uninitialized in here.
         // in a sec, we'll also add all the callbacks into the fields.
@@ -137,7 +137,7 @@ impl GpsThread {
 
             // read from the socket until our buffer is full (or we run out of input)
             let read_bytes = udp_socket
-                .recv(buf.as_mut_slice())
+                .peek(buf.as_mut_slice())
                 .inspect_err(|e| tracing::warn!("Failed to read from socket! err: {e}"))
                 .unwrap_or(0) as u32;
 
@@ -524,7 +524,7 @@ mod callbacks {
 #[cfg(test)]
 mod tests {
     use super::GpsThread;
-    use std::{ffi::c_void, mem::ManuallyDrop, net::UdpSocket, thread::sleep, time::Duration};
+    use std::time::Duration;
 
     /// simply creating a thread should work out alright.
     #[test]
