@@ -253,6 +253,14 @@ pub enum GpsThreadError {
 }
 
 /// A message of information received from the GPS.
+#[derive(Clone, Debug, Default)]
+pub struct GpsData {
+    pub pos: Option<msg_pos_llh_t>,
+    pub baseline: Option<msg_baseline_ned_t>,
+    pub velocity: Option<msg_vel_ned_t>,
+    pub precision: Option<msg_dops_t>,
+    pub time_of_week: Option<msg_gps_time_t>,
+    pub imu_raw: Option<msg_imu_raw_t>,
 }
 
 // this one function helps with reading from the socket
