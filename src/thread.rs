@@ -38,6 +38,7 @@ unsafe impl Sync for SbpStateT {}
 /// A thread with some data running in the background.
 ///
 /// Collects GPS data for later use.
+#[derive(Debug)]
 pub struct GpsThread {
     // /// A socket connecting to the GPS.
     // socket: Arc<UdpSocket>,
