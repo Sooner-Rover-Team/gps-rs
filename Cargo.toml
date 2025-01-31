@@ -1,6 +1,6 @@
 [package]
 name = "soro_gps"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 description = "Bindings to the Sooner Rover Team's `gps` library"
