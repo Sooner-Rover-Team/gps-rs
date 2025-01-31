@@ -277,6 +277,30 @@ impl GpsThread {
         self.stop_indicator.store(true, Ordering::Release);
         tracing::debug!("Set stop flag for thread.");
     }
+
+    /// Makes a copy of the most up-to-date data as of calling.
+    ///
+    /// If unavailable, we'll wait for it, but an error will become an `Option`.
+    #[tracing::instrument(skip(self))]
+    pub fn data(&self) -> Option<GpsData> {
+        // SAFETY: the gps data is always safe to read, as it's behind a Mutex.
+        let mutex = unsafe { self.data_ptr.read() };
+
+        // wait for lock or return None.
+        //
+        // if we do get it, we'll clone the structure.
+        let data = mutex
+            .lock()
+            .inspect_err(|e| tracing::warn!("Failed to lock Mutex! err: {e}"))
+            .ok()
+            .map(|guarded| guarded.clone());
+
+        // note: we do this because the mutex wants to be dropped as a local
+        //
+        // otherwise, you don't usually see a variable return in short Rust
+        // funcs like this. :D
+        data
+    }
 }
 
 impl Drop for GpsThread {
