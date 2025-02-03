@@ -25,8 +25,8 @@ tracing = "0.1.41"
 pyo3 = { version = "0.23.4", optional = true, features = ["extension-module"] }
 
 [build-dependencies]
-bindgen = "0.71.1"
-cc = "1.2.10"
+bindgen = "0.71"
+cc = "1.2"
 
 ## python build configuration
 [tool.maturin]
