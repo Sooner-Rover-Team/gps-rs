@@ -3,11 +3,11 @@ name = "soro_gps"
 version = "0.2.1"
 edition = "2021"
 
-description = "Bindings to the Sooner Rover Team's `gps` library"
-repository = "https://github.com/Sooner-Rover-Team/gps-rs"
+description = "A new `gps` library for our old GPS"
+repository = "https://github.com/Sooner-Rover-Team/soro_gps"
 homepage = "https://github.com/Sooner-Rover-Team"
 license = "MIT"
-categories = ["science::robotics", "api-bindings"]
+categories = ["science::robotics"]
 keywords = ["soro", "sooner-rover-team", "urc", "mars", "rover"]
 readme = "README.md"
 
@@ -24,9 +24,6 @@ pisserror = "0.3.0-rc.2"
 tracing = "0.1.41"
 pyo3 = { version = "0.23.4", optional = true, features = ["extension-module"] }
 
-[build-dependencies]
-bindgen = "0.71"
-cc = "1.2"
 
 ## python build configuration
 [tool.maturin]
