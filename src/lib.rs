@@ -1,12 +1,6 @@
-//! # `gps-rs`
+//! # `soro_gps`
 //!
-//! Bindings to the Swift GPS library ([`gps/`](https://github.com/Sooner-Rover-Team/gps)).
-//!
-//! This crate exposes the `bindings` module to access the C functions and statics directly.
-//!
-//! However, intended usage is through the `Gps` struct, which provides a safe wrapper for the unsafe C items.
-//!
-//! This type exposes safe bindings with respect to the (kinda undocumented) safety constraints of the C code. Previous testing shows that violating these unspoken invariants can result in all kinds of weird behavior!
+//! Connects to the GPS and provides its data in a readable format.
 //!
 //! ## Usage (Rust)
 //!
@@ -33,51 +27,40 @@
 //! // dropping it (when it falls from scope) automatically runs the required cleanup.
 //! ```
 //!
-//! ## Usage (Python)
-//!
-//! ```python
-//! from soro_gps import Gps
-//!
-//! # make a gps from an ip str + port int
-//! gps: Gps = Gps("192.168.1.222", 55556)
-//!
-//! # grab values from methods
-//! print(f"coord: {gps.coord()}")
-//! print(f"height: {gps.height()}")
-//! print(f"error: {gps.error()}")
-//! ```
-//!
 //! ## Development
 //!
-//! To make small changes on the Rust side of things, you won't need any Python tooling until you make a release. Just [install Rust](https://rustup.rs).
-//!
-//! For anything past that (especially Python development), you'll want to get `maturin`. To do so, [download `cargo-binstall`](https://github.com/cargo-bins/cargo-binstall?tab=readme-ov-file#quickly), then run `cargo binstall maturin`.
-//!
-//! Afterwards, you can build the Python wheel with `maturin build --release --out dist --interpreter python3.13`. That'll result in a `.whl` ("wheel") file in the `dist/` directory. Distribute it on PyPi by running `maturin publish`. Alternatively, you can push it into your virtual environment with `pip install soro_gps --find-links dist --force-reinstall`.
+//! To make changes, [install Rust](https://rustup.rs).
 //!
 //! ### Testing
 //!
-//! You'll want to run the tests before
+//! You'll want to run the tests before making releases. It's good to test everything concurrently, so consider using `cargo nextest` if you have it installed.
 
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
+use core::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
-use core::error::Error;
-use std::net::IpAddr;
+use error::{GpsConnectionError, GpsReadError};
+use soro_sbp_gps::{
+    variants::{Message, NavMsg},
+    SbpFrame,
+};
+use tokio::net::UdpSocket;
+use tokio_stream::StreamExt as _;
+use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 
-use thread::{GpsThread, GpsThreadError};
+pub mod error;
 
-pub mod thread;
+/// The best possible update time for the GPS.
+///
+/// This is 1/20th of a second.
+pub const BEST_UPDATE_TIME: Duration = Duration::from_millis(1000 / 20);
 
 /// A safe wrapper for the low-level GPS functions.
 #[derive(Debug)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct Gps {
-    /// The internal `gps.c` reimplementation.
+    /// A UDP socket to speak with the GPS directly.
     ///
-    /// It interfaces with the lower-level parts of the C library for us.
-    thread: GpsThread,
+    /// This allows us to get frames from the GPS.
+    framed_socket: UdpFramed<BytesCodec>,
 }
 
 impl Gps {
@@ -85,179 +68,183 @@ impl Gps {
     ///
     /// ## Errors
     ///
-    /// This constructor can fail if the given IP and port are not able to be
-    /// converted to a CString, but this should generally succeed.
+    /// This constructor can fail if the GPS device is not available on the
+    /// provided IP address and port.
     #[tracing::instrument]
-    pub fn new(gps_ip: IpAddr, gps_port: u16, socket_port: u16) -> Result<Self, GpsError> {
-        let thread = GpsThread::new(gps_ip, gps_port, socket_port)
-            .inspect_err(|e| tracing::warn!("Failed to set up GPS thread. err: {e}"))?;
+    pub async fn new(
+        gps_ip: IpAddr,
+        gps_port: u16,
+        socket_port: u16,
+    ) -> Result<Self, GpsConnectionError> {
+        // bind the socket to a local port
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, socket_port))
+            .await
+            .inspect_err(|e| {
+                tracing::error!(
+                    "Failed to bind to the given socket \
+                        port (i.e. the port we talk to the GPS from). There may be another \
+                        service on this port. err: {e}"
+                );
+            })?;
 
-        Ok(Self { thread })
+        // connect to the gps and check its file descriptor
+        socket.connect((gps_ip, gps_port)).await.inspect_err(|e| tracing::warn!("Failed to connect to the given IP and port. The GPS may not be accessible. err: {e}"))?;
+
+        // make into a UdpFramed so we can get a stream outta it
+        let framed_socket = UdpFramed::new(socket, BytesCodec::new());
+
+        Ok(Self { framed_socket })
     }
 
-    /// Finds the coordinate as determined by the GPS.
-    #[tracing::instrument(skip(self))]
-    pub fn coord(&self) -> Option<Coordinate> {
-        let pos_data = self.thread.data()?.pos?;
-
-        Some(Coordinate {
-            lat: pos_data.lat,
-            lon: pos_data.lon,
-        })
-    }
-
-    /// Finds the 'height', which is an arbitrary measure with WSG84.
+    /// Attempts to get the required GPS message.
     ///
-    /// See the [`Height`] for additional information.
-    #[tracing::instrument(skip(self))]
-    pub fn height(&self) -> Option<Height> {
-        let pos_data = self.thread.data()?.pos?;
-        Some(Height(pos_data.height))
-    }
+    /// This can run forever! Run it on a background task if that won't work
+    /// for your usage.
+    pub async fn get(&mut self) -> Result<GpsInfo, GpsReadError> {
+        // make a stream
+        while let Some(udp_frame) = self.framed_socket.next().await {
+            // try and grab a frame
+            let bytes = match udp_frame {
+                Ok((bytes, _socket_addr)) => bytes,
+                Err(e) => {
+                    tracing::warn!("Failed to read from socket! err: {e}");
+                    continue;
+                }
+            };
 
-    /// Gets the known 'error' in millimeters from the GPS.
-    #[tracing::instrument(skip(self))]
-    pub fn error(&self) -> Option<ErrorInMm> {
-        let pos_data = self.thread.data()?.pos?;
+            // try to parse whatever we got
+            let (_, message) = match SbpFrame::parse(&bytes) {
+                Ok(fm) => fm,
+                Err(e) => {
+                    tracing::warn!("Failed to parse this message! err: {e}");
+                    continue;
+                }
+            };
 
-        // the following uses two millimeter accuracy values averaged.
+            // we exclusively use this message type lol.
+            if let Message::Navigation(NavMsg::MsgPosLlh(raw_coord)) = message {
+                let info = GpsInfo {
+                    coord: Coordinate {
+                        lat: raw_coord.lat,
+                        lon: raw_coord.lon,
+                    },
+                    height: Height(raw_coord.height),
+                    tow: TimeOfWeek(raw_coord.tow),
+                };
+
+                tracing::debug!("Got all info from GPS! info: \n    {info}");
+                return Ok(info);
+            }
+        }
+
+        // this happens if the socket has nothing left in the stream.
         //
-        // we convert them to f64 before addition to prevent overflows, though
-        // this miiiight decrease accuracy. hoping `f64` is good enough.
-        //
-        // FIXME: this is ripped straight from `gps.c`, but they didn't make
-        // great decisions in there. consider making this error a 'better' type
-        // or something. im doubtful that averaging the two directions makes
-        // for a good result. lol
-        let error = (pos_data.h_accuracy as f64 + pos_data.v_accuracy as f64) / 2.0;
-
-        Some(ErrorInMm(error))
-    }
-
-    /// From the satellite, grabs the number of milliseconds since the start of
-    /// this week. Meaning the "time of week".
-    pub fn time_of_week(&self) -> Option<TimeOfWeek> {
-        let pos_data = self.thread.data()?.pos?;
-        Some(TimeOfWeek(pos_data.tow))
+        // which i don't expect to happen but whatever, nice to handle it anyways
+        tracing::error!("Socket has stopped providing information!");
+        Err(GpsReadError::ReadFailed)
     }
 }
 
-// when python is turned on, we'll create an exception
-#[cfg(feature = "python")]
-pyo3::create_exception!(error, GpsException, pyo3::exceptions::PyException);
+/*
+/// A safe wrapper for the low-level GPS functions.
+#[derive(Debug)]
+pub struct Gps {
+    /// The SBP parser and the message it produces.
+    parser: Option<(soro_sbp_gps::SbpFrame, soro_sbp_gps::variants::Message)>,
 
-#[cfg(feature = "python")]
-#[cfg_attr(feature = "python", pyo3::pymethods)]
+    /// The time we last updated the frame.
+    last_updated: Option<Instant>,
+
+    /// A UDP socket to speak with the GPS directly.
+    ///
+    /// This allows us to get frames from the GPS.
+    framed_socket: UdpFramed<BytesCodec>,
+
+    /// A buffer containing the most recent frame data.
+    buf: [u8; soro_sbp_gps::MAX_FRAME_SIZE as usize],
+
+    /// The timeout before giving up on a read.
+    timeout: Duration,
+}
+
 impl Gps {
-    #[new]
-    #[tracing::instrument]
-    pub fn py_new(gps_ip: String, gps_port: u16, socket_port: u16) -> pyo3::PyResult<Self> {
-        let gps_ip = gps_ip.parse()?;
-
-        Self::new(gps_ip, gps_port, socket_port)
-            .inspect_err(|e| tracing::warn!("Failed to create GPS! err: {e}"))
-            .map_err(|e| GpsException::new_err(e.to_string()))
-    }
-
-    /// Finds the coordinate as determined by the GPS.
-    #[pyo3(name = "coord")]
-    #[tracing::instrument(skip(self))]
-    pub fn py_coord(&self) -> Option<Coordinate> {
-        self.coord()
-    }
-
-    /// Finds the 'height', which is an arbitrary measure with WSG84.
+    /// Attempts to update our internal state with the GPS' values.
     ///
-    /// See the [`Height`] for additional information.
-    #[pyo3(name = "height")]
-    #[tracing::instrument(skip(self))]
-    pub fn py_height(&self) -> Option<Height> {
-        self.height()
-    }
+    /// note: We only actually perform updates when the GPS has had time to
+    /// get a new message.
+    async fn update(&mut self) -> Result<(), GpsReadError> {
+        // only update if we've had enough time to get a new frame
+        if let Some(last_updated) = self.last_updated {
+            let elapsed = last_updated.elapsed();
+            if elapsed < BEST_UPDATE_TIME {
+                tracing::debug!("Asked for an update, but we don't need to do so yet.");
+                return Err(GpsReadError::HaventHitUpdateTime { elapsed });
+            }
+        }
 
-    /// Gets the known 'error' in millimeters from the GPS.
-    #[pyo3(name = "error")]
-    #[tracing::instrument(skip(self))]
-    pub fn py_error(&self) -> Option<ErrorInMm> {
-        self.error()
-    }
+        // try reading from the socket
+        let recv_fut = self.socket.recv(&mut self.buf);
+        let _bytes_read = tokio::time::timeout(self.timeout, recv_fut)
+            .await
+            .map_err(|elp| {
+                tracing::debug!("Hit timeout. elapsed: {elp}");
+                GpsReadError::HitTimeout(self.timeout)
+            })?
+            .map_err(|e| {
+                tracing::warn!("Read failed! err: {e}");
+                GpsReadError::ReadFailed
+            })
+            .inspect(|bytes_read| tracing::debug!("Read {bytes_read} bytes!"))?;
 
-    /// Gets the known 'error' in millimeters from the GPS.
-    #[pyo3(name = "time_of_week")]
-    #[tracing::instrument(skip(self))]
-    pub fn py_time_of_week(&self) -> Option<TimeOfWeek> {
-        self.time_of_week()
+        // try parsing
+        let parser = SbpFrame::parse(&self.buf)?;
+
+        // if it worked, update self.last_updated
+        self.last_updated = Some(Instant::now());
+        self.parser = Some(parser);
+
+        tracing::debug!("Finished updating!");
+        Ok(())
     }
 }
+*/
 
-// SAFETY: we don't actually use the internal ptrs until we drop the class.
-unsafe impl Send for Gps {}
-
-// SAFETY: see above!
-unsafe impl Sync for Gps {}
-
-impl Drop for Gps {
-    #[tracing::instrument(skip(self))]
-    fn drop(&mut self) {
-        tracing::debug!("Calling `gps_finish`...");
-
-        // SAFETY: we do not drop the strings we gave it, as doing so can cause
-        // a double-free. and the library already has one of those somewhere!
-        unsafe { bindings::gps_finish() };
-    }
+/// Information from the GPS.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct GpsInfo {
+    pub coord: Coordinate,
+    pub height: Height,
+    // pub error_mm: ErrorInMm, // FIXME: is this still unimplemented for our gps model? try updating?
+    pub tow: TimeOfWeek,
 }
 
-/// An error that can occur when using the GPS.
-#[derive(Debug, pisserror::Error)]
-pub enum GpsError {
-    #[error("Error occurred while constructing the GPS thread. err: {_0}")]
-    GpsThreadError(#[from] GpsThreadError),
+impl core::fmt::Display for GpsInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "GpsInfo {{ coord(lat: {}, lon: {}), height: {} m above wsg84, tow: {} ms }}",
+            self.coord.lat, self.coord.lon, self.height.0, self.tow.0
+        )
+    }
 }
 
 /// Some coordinate returned from the GPS.
 ///
 /// The returned values are in degrees.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
-#[cfg_attr(feature = "python", pyo3(eq))]
 pub struct Coordinate {
     pub lat: f64,
     pub lon: f64,
 }
 
-#[cfg_attr(feature = "python", pyo3::pymethods)]
-impl Coordinate {
-    pub fn __str__(&self) -> String {
-        format!("{}° lat, {}° lon", self.lat, self.lon)
-    }
-}
-
 /// Height, with the unit being "meters above a WGS84 ellipsoid".
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
-#[cfg_attr(feature = "python", pyo3(eq))]
 pub struct Height(pub f64);
-
-#[cfg_attr(feature = "python", pyo3::pymethods)]
-impl Height {
-    pub fn __str__(&self) -> String {
-        format!("{:.2}m", self.0)
-    }
-}
 
 /// Error in millimeters. Inside the `gps` library, this is calculated as the
 /// average of the vertical and horizontal 'error'.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
-#[cfg_attr(feature = "python", pyo3(eq))]
 pub struct ErrorInMm(pub f64);
-
-#[cfg_attr(feature = "python", pyo3::pymethods)]
-impl ErrorInMm {
-    pub fn __str__(&self) -> String {
-        format!("{:.2}mm", self.0)
-    }
-}
 
 /// The GPS time of week, given from the satellite. This is measured in
 /// milliseconds since the start of this GNSS week.
@@ -265,19 +252,4 @@ impl ErrorInMm {
 /// For additional information, see
 /// [the NOAA documentation](https://www.ngs.noaa.gov/CORS/Gpscal.shtml).
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
-#[cfg_attr(feature = "python", pyo3(eq))]
 pub struct TimeOfWeek(pub u32);
-
-// export the module to python!
-#[cfg_attr(feature = "python", pyo3::pymodule)]
-#[cfg(feature = "python")]
-fn soro_gps(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
-    pyo3::types::PyModuleMethods::add_class::<Gps>(m)?;
-    pyo3::types::PyModuleMethods::add_class::<Coordinate>(m)?;
-    pyo3::types::PyModuleMethods::add_class::<Height>(m)?;
-    pyo3::types::PyModuleMethods::add_class::<ErrorInMm>(m)?;
-    pyo3::types::PyModuleMethods::add_class::<TimeOfWeek>(m)?;
-    pyo3::types::PyModuleMethods::add(m, "GpsException", m.py().get_type::<GpsException>())?;
-    Ok(())
-}
