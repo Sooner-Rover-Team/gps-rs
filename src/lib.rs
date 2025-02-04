@@ -68,10 +68,6 @@ use std::net::IpAddr;
 
 use thread::{GpsThread, GpsThreadError};
 
-pub mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
-
 pub mod thread;
 
 /// A safe wrapper for the low-level GPS functions.
