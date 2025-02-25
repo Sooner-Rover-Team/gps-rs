@@ -39,15 +39,16 @@ use core::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use error::{GpsConnectionError, GpsReadError};
-use soro_sbp_gps::{
-    variants::{Message, NavMsg},
-    SbpFrame,
-};
+// use soro_sbp_gps::{
+//     variants::{Message, NavMsg},
+//     SbpFrame,
+// };
 use tokio::net::UdpSocket;
 use tokio_stream::StreamExt as _;
 use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 
 pub mod error;
+// pub use soro_sbp_gps;
 
 /// The best possible update time for the GPS.
 ///
@@ -60,7 +61,9 @@ pub struct Gps {
     /// A UDP socket to speak with the GPS directly.
     ///
     /// This allows us to get frames from the GPS.
-    framed_socket: UdpFramed<BytesCodec>,
+    socket: UdpSocket,
+
+    buf: [u8; 1024],
 }
 
 impl Gps {
@@ -77,7 +80,7 @@ impl Gps {
         socket_port: u16,
     ) -> Result<Self, GpsConnectionError> {
         // bind the socket to a local port
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, socket_port))
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 54555))
             .await
             .inspect_err(|e| {
                 tracing::error!(
@@ -88,60 +91,69 @@ impl Gps {
             })?;
 
         // connect to the gps and check its file descriptor
-        socket.connect((gps_ip, gps_port)).await.inspect_err(|e| tracing::warn!("Failed to connect to the given IP and port. The GPS may not be accessible. err: {e}"))?;
+        // socket.connect((gps_ip, gps_port)).await.inspect_err(|e| tracing::warn!("Failed to connect to the given IP and port. The GPS may not be accessible. err: {e}"))?;
+        tracing::debug!("Connected to GPS. (ip: {gps_ip}, gps port: {gps_port})");
 
-        // make into a UdpFramed so we can get a stream outta it
-        let framed_socket = UdpFramed::new(socket, BytesCodec::new());
-
-        Ok(Self { framed_socket })
+        Ok(Self {
+            socket,
+            buf: [0; 1024],
+        })
     }
 
     /// Attempts to get the required GPS message.
     ///
     /// This can run forever! Run it on a background task if that won't work
     /// for your usage.
+    #[tracing::instrument(skip(self))]
     pub async fn get(&mut self) -> Result<GpsInfo, GpsReadError> {
-        // make a stream
-        while let Some(udp_frame) = self.framed_socket.next().await {
-            // try and grab a frame
-            let bytes = match udp_frame {
-                Ok((bytes, _socket_addr)) => bytes,
-                Err(e) => {
-                    tracing::warn!("Failed to read from socket! err: {e}");
-                    continue;
-                }
-            };
+        tracing::trace!(
+            "Attempting to get a GPS message. If this message \
+            shows up without progress, no messages are being recv'd."
+        );
+
+        // grab data until we have the correct message type
+        loop {
+            self.buf = [0; 1024];
+
+            let (bytes_recvd, remote_addr) = self
+                .socket
+                .recv_from(&mut self.buf)
+                .await
+                .inspect_err(|e| tracing::error!("Failed to recv from GPS socket! err: {e}"))
+                .map_err(|_| GpsReadError::ReadFailed)?;
+
+            tracing::trace!("got {} bytes from ip: {}", bytes_recvd, remote_addr);
 
             // try to parse whatever we got
-            let (_, message) = match SbpFrame::parse(&bytes) {
-                Ok(fm) => fm,
-                Err(e) => {
-                    tracing::warn!("Failed to parse this message! err: {e}");
-                    continue;
-                }
-            };
+            let all_parsed = sbp::iter_messages(self.buf.as_slice());
 
-            // we exclusively use this message type lol.
-            if let Message::Navigation(NavMsg::MsgPosLlh(raw_coord)) = message {
-                let info = GpsInfo {
-                    coord: Coordinate {
-                        lat: raw_coord.lat,
-                        lon: raw_coord.lon,
-                    },
-                    height: Height(raw_coord.height),
-                    tow: TimeOfWeek(raw_coord.tow),
+            for msg in all_parsed {
+                // this might be the message we want, but we gotta check (below)
+                let maybe_good_msg = match msg {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse this message! err: {e}");
+                        return Err(GpsReadError::ParseFailed(e));
+                    }
                 };
 
-                tracing::debug!("Got all info from GPS! info: \n    {info}");
-                return Ok(info);
+                // if it's the frame we want, break
+                if let sbp::Sbp::MsgPosLlh(raw_coord) = maybe_good_msg {
+                    tracing::debug!("Parsed message!");
+                    let info = GpsInfo {
+                        coord: Coordinate {
+                            lat: raw_coord.lat,
+                            lon: raw_coord.lon,
+                        },
+                        height: Height(raw_coord.height),
+                        tow: TimeOfWeek(raw_coord.tow),
+                    };
+
+                    tracing::debug!("Got all info from GPS! info: \n    {info}");
+                    return Ok(info);
+                }
             }
         }
-
-        // this happens if the socket has nothing left in the stream.
-        //
-        // which i don't expect to happen but whatever, nice to handle it anyways
-        tracing::error!("Socket has stopped providing information!");
-        Err(GpsReadError::ReadFailed)
     }
 }
 

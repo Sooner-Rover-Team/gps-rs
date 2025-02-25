@@ -12,7 +12,7 @@ pub enum GpsConnectionError {
 }
 
 /// An error that may occur when reading from the GPS.
-#[derive(Clone, Debug, PartialEq, PartialOrd, Hash, pisserror::Error)]
+#[derive(Debug, pisserror::Error)]
 pub enum GpsReadError {
     #[error("GPS can't update that fast. elapsed: {} ms", elapsed.as_millis())]
     HaventHitUpdateTime { elapsed: Duration },
@@ -24,5 +24,5 @@ pub enum GpsReadError {
     ReadFailed,
 
     #[error("Parsing failed.")]
-    ParseFailed(#[from] soro_sbp_gps::error::SbpError),
+    ParseFailed(#[from] sbp::Error),
 }
