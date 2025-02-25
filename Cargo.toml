@@ -1,6 +1,6 @@
 [package]
 name = "soro_gps"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 
 description = "A new `gps` library for our old GPS"
@@ -23,11 +23,11 @@ python = ["pyo3"]
 pisserror = "0.3.0-rc.2"
 tracing = "0.1.41"
 pyo3 = { version = "0.23.4", optional = true, features = ["extension-module"] }
-soro_sbp_gps = { git = "https://github.com/sooner-rover-team/soro_sbp_gps", version = "0.1.0" }
+sbp = "6.2.1"
+# soro_sbp_gps = { git = "https://github.com/sooner-rover-team/soro_sbp_gps", version = "0.1.0" }
 tokio = { version = "1.43.0", features = ["net", "time"] }
 tokio-util = { version = "0.7.13", features = ["net", "codec"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
-
 
 ## python build configuration
 [tool.maturin]
