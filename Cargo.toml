@@ -1,6 +1,6 @@
 [package]
 name = "soro_gps"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 description = "A new `gps` library for our old GPS"
