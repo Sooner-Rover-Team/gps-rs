@@ -39,16 +39,9 @@ use core::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use error::{GpsConnectionError, GpsReadError};
-// use soro_sbp_gps::{
-//     variants::{Message, NavMsg},
-//     SbpFrame,
-// };
 use tokio::net::UdpSocket;
-use tokio_stream::StreamExt as _;
-use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 
 pub mod error;
-// pub use soro_sbp_gps;
 
 /// The best possible update time for the GPS.
 ///
