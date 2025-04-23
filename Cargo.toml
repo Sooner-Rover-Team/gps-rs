@@ -11,28 +11,16 @@ categories = ["science::robotics"]
 keywords = ["soro", "sooner-rover-team", "urc", "mars", "rover"]
 readme = "README.md"
 
-
 [lib]
 crate-time = ["staticlib"]
 
-[features]
-default = ["python"]
-python = ["pyo3"]
-
 [dependencies]
-pisserror = "0.3.0-rc.2"
+pisserror = "0.3.0"
 tracing = "0.1.41"
-pyo3 = { version = "0.23.4", optional = true, features = ["extension-module"] }
 sbp = "6.2.1"
-# soro_sbp_gps = { git = "https://github.com/sooner-rover-team/soro_sbp_gps", version = "0.1.0" }
 tokio = { version = "1.43.0", features = ["net", "time"] }
 tokio-util = { version = "0.7.13", features = ["net", "codec"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
-
-## python build configuration
-[tool.maturin]
-bindings = "pyo3"
-features = ["python"]
 
 [dev-dependencies]
 tracing-subscriber = "0.3.19"

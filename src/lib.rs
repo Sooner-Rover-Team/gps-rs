@@ -43,6 +43,8 @@ use tokio::net::UdpSocket;
 
 pub mod error;
 
+use sbp::messages::navigation::msg_pos_llh_cov::FixMode;
+
 /// The best possible update time for the GPS.
 ///
 /// This is 1/20th of a second.
@@ -104,7 +106,7 @@ impl Gps {
             shows up without progress, no messages are being recv'd."
         );
 
-        // grab data until we have the correct message type
+        // grab data until we have the correct message types
         loop {
             self.buf = [0; 1024];
 
@@ -130,19 +132,60 @@ impl Gps {
                     }
                 };
 
-                // if it's the frame we want, break
-                if let sbp::Sbp::MsgPosLlh(raw_coord) = maybe_good_msg {
-                    tracing::debug!("Parsed message!");
-                    let info = GpsInfo {
-                        coord: Coordinate {
-                            lat: raw_coord.lat,
-                            lon: raw_coord.lon,
-                        },
-                        height: Height(raw_coord.height),
-                        tow: TimeOfWeek(raw_coord.tow),
+                // check for the coordinate
+                if let sbp::Sbp::MsgPosLlhCov(msg_pos_llh_cov) = maybe_good_msg {
+                    tracing::debug!("Found all required frames!");
+
+                    // create the covariance.
+                    //
+                    // note: ROS 2 wants `ENU`, but Swift provides `NED`.
+                    // we'll move things around and flip down -> up...
+                    let position_covariance: [f64; 9] = [
+                        // east
+                        msg_pos_llh_cov.cov_e_e as f64,
+                        msg_pos_llh_cov.cov_n_e as f64,
+                        -msg_pos_llh_cov.cov_e_d as f64,
+                        // north
+                        msg_pos_llh_cov.cov_n_e as f64,
+                        msg_pos_llh_cov.cov_n_n as f64,
+                        -msg_pos_llh_cov.cov_n_d as f64,
+                        // up
+                        -msg_pos_llh_cov.cov_e_d as f64,
+                        -msg_pos_llh_cov.cov_n_d as f64,
+                        msg_pos_llh_cov.cov_d_d as f64,
+                    ];
+
+                    let fix_mode = match msg_pos_llh_cov.fix_mode() {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::error!("Failed to get fix mode from SwiftNav `MsgPosLlhCov`! err code: {e}");
+                            continue;
+                        }
                     };
 
-                    tracing::debug!("Got all info from GPS! info: \n    {info}");
+                    // we'll make the fix status from the status byte
+                    let fix_status = match fix_mode {
+                        FixMode::Invalid | FixMode::DeadReckoning => FixStatus::Invalid,
+                        FixMode::SinglePointPosition => FixStatus::SinglePoint,
+                        FixMode::SbasPosition => FixStatus::Sbas,
+                        FixMode::DifferentialGnss | FixMode::FloatRtk | FixMode::FixedRtk => {
+                            FixStatus::GroundBased
+                        }
+                    };
+
+                    // construct our gps info message
+                    let info = GpsInfo {
+                        coord: Coordinate {
+                            lat: msg_pos_llh_cov.lat,
+                            lon: msg_pos_llh_cov.lon,
+                        },
+                        height: Height(msg_pos_llh_cov.height),
+                        tow: TimeOfWeek(msg_pos_llh_cov.tow),
+                        fix_status,
+                        covariance: position_covariance,
+                    };
+
+                    // return it
                     return Ok(info);
                 }
             }
@@ -155,8 +198,9 @@ impl Gps {
 pub struct GpsInfo {
     pub coord: Coordinate,
     pub height: Height,
-    // pub error_mm: ErrorInMm, // FIXME: is this still unimplemented for our gps model? try updating?
     pub tow: TimeOfWeek,
+    pub covariance: [f64; 9],
+    pub fix_status: FixStatus,
 }
 
 impl core::fmt::Display for GpsInfo {
@@ -194,3 +238,12 @@ pub struct ErrorInMm(pub f64);
 /// [the NOAA documentation](https://www.ngs.noaa.gov/CORS/Gpscal.shtml).
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct TimeOfWeek(pub u32);
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub enum FixStatus {
+    Invalid,
+    SinglePoint,
+    Sbas,
+    GroundBased,
+}
